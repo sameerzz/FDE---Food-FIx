@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, ChangeEvent } from 'react';
 import { MessageSquare, X, Send, Image as ImageIcon, Sparkles, AlertCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { supabase, isSupabaseConfigured } from '../supabase';
 
 interface ChatMessage {
   text: string;
@@ -8,7 +9,7 @@ interface ChatMessage {
   image?: string;
 }
 
-export const SupportChat = () => {
+export const SupportChat = ({ user }: { user?: any }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([
     { text: 'Hi! I’m FoodFix Support. How can I help you today? Check out our recommendations or message us if you have any order details to check!', type: 'bot' }
@@ -19,6 +20,62 @@ export const SupportChat = () => {
   const [isEscalated, setIsEscalated] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Load previous messages from Supabase chat_messages on component mount or when user changes
+  useEffect(() => {
+    const fetchPreviousMessages = async () => {
+      if (!isSupabaseConfigured) return;
+      try {
+        const currentUser = user || (await supabase.auth.getUser()).data.user;
+        if (currentUser) {
+          const { data, error } = await supabase
+            .from('chat_messages')
+            .select('*')
+            .eq('user_id', currentUser.id)
+            .order('created_at', { ascending: true });
+
+          if (error) {
+            console.error('[Support Chat] Error fetching previous messages:', error);
+          } else if (data) {
+            const dbMessages: ChatMessage[] = data.map((msg: any) => {
+              let type: 'user' | 'bot' = 'user';
+              let text = msg.message || '';
+
+              if (text.startsWith('bot:')) {
+                type = 'bot';
+                text = text.substring(4);
+              } else if (text.startsWith('user:')) {
+                type = 'user';
+                text = text.substring(5);
+              } else if (text.startsWith('assistant:')) {
+                type = 'bot';
+                text = text.substring(10);
+              }
+
+              return {
+                text,
+                type,
+              };
+            });
+            // Combine initial greeting with loaded messages from the database
+            setMessages([
+              { text: 'Hi! I’m FoodFix Support. How can I help you today? Check out our recommendations or message us if you have any order details to check!', type: 'bot' },
+              ...dbMessages
+            ]);
+          }
+        } else {
+          // Reset chat messages to welcome message if user logged out
+          setMessages([
+            { text: 'Hi! I’m FoodFix Support. How can I help you today? Check out our recommendations or message us if you have any order details to check!', type: 'bot' }
+          ]);
+        }
+      } catch (err) {
+        console.error('[Support Chat] Error during loading previous messages:', err);
+      }
+    };
+
+    fetchPreviousMessages();
+  }, [user]);
 
   // Automatically scroll to the bottom of the chat when messages change
   useEffect(() => {
@@ -59,6 +116,26 @@ export const SupportChat = () => {
     setMessages(updatedMessages);
     setIsTyping(true);
 
+    // Save message to Supabase if configured
+    if (isSupabaseConfigured) {
+      try {
+        const currentUser = user || (await supabase.auth.getUser()).data.user;
+        if (currentUser) {
+          const { error: insertError } = await supabase
+            .from('chat_messages')
+            .insert({
+              user_id: currentUser.id,
+              message: `user:${textToSend || 'Uploaded image'}`
+            });
+          if (insertError) {
+            console.error('[Support Chat] Error inserting message to Supabase:', insertError);
+          }
+        }
+      } catch (err) {
+        console.error('[Support Chat] Supabase error in save message:', err);
+      }
+    }
+
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
@@ -84,6 +161,35 @@ export const SupportChat = () => {
           }
           return next;
         });
+
+        // Save AI message to Supabase
+        if (isSupabaseConfigured) {
+          try {
+            const currentUser = user || (await supabase.auth.getUser()).data.user;
+            if (currentUser) {
+              const { error: insertError } = await supabase
+                .from('chat_messages')
+                .insert({
+                  user_id: currentUser.id,
+                  message: `bot:${data.text}`
+                });
+              if (insertError) {
+                console.error('[Support Chat] Error inserting AI message to Supabase:', insertError);
+              }
+
+              if (data.escalated) {
+                await supabase
+                  .from('chat_messages')
+                  .insert({
+                    user_id: currentUser.id,
+                    message: "bot:👩‍💼 [Human Handoff] I've connected this session directly to our duty manager. A live human agent is reviewing your logs and will message you shortly!"
+                  });
+              }
+            }
+          } catch (err) {
+            console.error('[Support Chat] Supabase error in save AI message:', err);
+          }
+        }
       } else if (data.error) {
         setMessages(prev => [...prev, { text: `Support encountered a problem: ${data.error}`, type: 'bot' }]);
       }
