@@ -95,16 +95,19 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// serve static build directory containing React build output if requested
-const distPath = path.join(process.cwd(), "dist");
-app.use(express.static(distPath));
+// Only serve static assets from Express if we are not running in a Vercel Serverless environment.
+// In Vercel, the static CDN serves the build output automatically.
+if (!process.env.VERCEL) {
+  const distPath = path.join(process.cwd(), "dist");
+  app.use(express.static(distPath));
 
-app.get("*", (req, res, next) => {
-  if (req.path.startsWith("/api/")) {
-    return next();
-  }
-  res.sendFile(path.join(distPath, "index.html"));
-});
+  app.get("*", (req, res, next) => {
+    if (req.path.startsWith("/api/")) {
+      return next();
+    }
+    res.sendFile(path.join(distPath, "index.html"));
+  });
+}
 
 // Export module app
 export default app;
