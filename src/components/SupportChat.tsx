@@ -22,76 +22,18 @@ export const SupportChat = ({ user }: { user?: any }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // Helper to resolve user ID for Supabase operations (handling standard auth vs guest mode)
-  const getResolvedUserId = async (currentUser: any): Promise<string | null> => {
-    if (!currentUser) return null;
-
-    if (currentUser.id === 'demo-guest-user') {
-      try {
-        // First look for any existing background anonymous session in Supabase
-        const { data: { session } } = await supabase.auth.getSession();
-        if (session?.user) {
-          // Clear any previous error if we recovered a session
-          setSupabaseWriteError(null);
-          return session.user.id;
-        }
-
-        // If no active session, sign in anonymously to create a valid authenticated session
-        const { data: anonymousData, error: anonymousError } = await supabase.auth.signInAnonymously();
-        if (anonymousError) {
-          console.warn('[Support Chat] Supabase Anonymous sign-in failed, attempting shared guest credential authentication:', anonymousError);
-          
-          const guestEmail = 'guest_demo_user@foodfix.com';
-          const guestPassword = 'FoodFixGuestPassword123!';
-          
-          // Try signing in
-          const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
-            email: guestEmail,
-            password: guestPassword
-          });
-          
-          if (!signInError && signInData?.user) {
-            setSupabaseWriteError(null);
-            return signInData.user.id;
-          }
-          
-          // If sign in failed because the user doesn't exist yet, sign them up
-          const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-            email: guestEmail,
-            password: guestPassword
-          });
-          
-          if (!signUpError && signUpData?.user) {
-            setSupabaseWriteError(null);
-            return signUpData.user.id;
-          }
-
-          // If all options fail, show a clear diagnostic error
-          const detailedError = signUpError?.message || signInError?.message || anonymousError.message;
-          setSupabaseWriteError(
-            `Supabase Guest authentication failed: "${detailedError}". Please make sure either (1) 'Allow Anonymous Sign-ins' is enabled under Authentication -> Providers -> Anonymous in your Supabase Auth Dashboard, or (2) Email signup/authentication is allowed.`
-          );
-        } else if (anonymousData?.user) {
-          setSupabaseWriteError(null);
-          return anonymousData.user.id;
-        }
-      } catch (e: any) {
-        console.error('[Support Chat] Error resolving guest user session:', e);
-        setSupabaseWriteError(`Error resolving guest session: ${e.message || e}`);
+  // Helper to ensure an active Supabase session
+  const ensureSession = async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      const { data, error } = await supabase.auth.signInAnonymously();
+      if (error) {
+        console.error('[Support Chat] Failed to sign in anonymously:', error);
+        throw error;
       }
-
-      // Fallback: Generate a persistent valid UUID format to satisfy Postgres data type layout
-      let fallbackId = localStorage.getItem('foodfix_guest_chat_uuid');
-      if (!fallbackId) {
-        fallbackId = '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, (c: any) =>
-          (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
-        );
-        localStorage.setItem('foodfix_guest_chat_uuid', fallbackId);
-      }
-      return fallbackId;
+      return data.session;
     }
-
-    return currentUser.id;
+    return session;
   };
 
   // Load previous messages from Supabase chat_messages on component mount or when user changes
@@ -99,58 +41,48 @@ export const SupportChat = ({ user }: { user?: any }) => {
     const fetchPreviousMessages = async () => {
       if (!isSupabaseConfigured) return;
       try {
-        const currentUser = user || (await supabase.auth.getUser()).data.user;
-        if (currentUser) {
-          const resolvedUserId = await getResolvedUserId(currentUser);
-          if (!resolvedUserId) return;
+        await ensureSession();
 
-          const { data, error } = await supabase
-            .from('chat_messages')
-            .select('*')
-            .eq('user_id', resolvedUserId)
-            .order('created_at', { ascending: true });
+        const { data, error } = await supabase
+          .from('chat_messages')
+          .select('*')
+          .order('created_at', { ascending: true });
 
-          if (error) {
-            console.error('[Support Chat] Error fetching previous messages:', error);
-            setSupabaseWriteError(
-              `Failed to load previous messages: "${error.message}". Please verify that the 'chat_messages' table exists in your Supabase database and that RLS policies allow you to select rows.`
-            );
-          } else if (data) {
-            // Clear any active write/sync error if fetching succeed
-            setSupabaseWriteError(null);
-            const dbMessages: ChatMessage[] = data.map((msg: any) => {
-              let type: 'user' | 'bot' = 'user';
-              let text = msg.message || '';
+        if (error) {
+          console.error('[Support Chat] Error fetching previous messages:', error);
+          setSupabaseWriteError(
+            `Failed to load previous messages: "${error.message}". Please verify that the 'chat_messages' table exists in your Supabase database and that RLS policies allow you to select rows.`
+          );
+        } else if (data) {
+          // Clear any active write/sync error if fetching succeed
+          setSupabaseWriteError(null);
+          const dbMessages: ChatMessage[] = data.map((msg: any) => {
+            let type: 'user' | 'bot' = 'user';
+            let text = msg.message || '';
 
-              if (text.startsWith('bot:')) {
-                type = 'bot';
-                text = text.substring(4);
-              } else if (text.startsWith('user:')) {
-                type = 'user';
-                text = text.substring(5);
-              } else if (text.startsWith('assistant:')) {
-                type = 'bot';
-                text = text.substring(10);
-              }
+            if (text.startsWith('bot:')) {
+              type = 'bot';
+              text = text.substring(4);
+            } else if (text.startsWith('user:')) {
+              type = 'user';
+              text = text.substring(5);
+            } else if (text.startsWith('assistant:')) {
+              type = 'bot';
+              text = text.substring(10);
+            }
 
-              return {
-                text,
-                type,
-              };
-            });
-            // Combine initial greeting with loaded messages from the database
-            setMessages([
-              { text: 'Hi! I’m FoodFix Support. How can I help you today? Check out our recommendations or message us if you have any order details to check!', type: 'bot' },
-              ...dbMessages
-            ]);
-          }
-        } else {
-          // Reset chat messages to welcome message if user logged out
+            return {
+              text,
+              type,
+            };
+          });
+          // Combine initial greeting with loaded messages from the database
           setMessages([
-            { text: 'Hi! I’m FoodFix Support. How can I help you today? Check out our recommendations or message us if you have any order details to check!', type: 'bot' }
+            { text: 'Hi! I’m FoodFix Support. How can I help you today? Check out our recommendations or message us if you have any order details to check!', type: 'bot' },
+            ...dbMessages
           ]);
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error('[Support Chat] Error during loading previous messages:', err);
       }
     };
@@ -177,6 +109,28 @@ export const SupportChat = ({ user }: { user?: any }) => {
     }
   }, [isOpen]);
 
+  // Helper function to save a message block to Supabase securely
+  const saveToSupabase = async (messageText: string) => {
+    if (!isSupabaseConfigured) return;
+    try {
+      await ensureSession();
+      const { error } = await supabase
+        .from('chat_messages')
+        .insert({
+          message: messageText
+        });
+      if (error) {
+        console.error('[Support Chat] Error saving message to Supabase:', error);
+        setSupabaseWriteError(`Failed to save message to Supabase: "${error.message}"`);
+      } else {
+        setSupabaseWriteError(null);
+      }
+    } catch (err: any) {
+      console.error('[Support Chat] Error in saveToSupabase:', err);
+      setSupabaseWriteError(`Connection error: ${err.message || err}`);
+    }
+  };
+
   const handleSend = async (customText?: string, attachedImage?: string) => {
     const textToSend = customText !== undefined ? customText : input;
     if (!textToSend.trim() && !attachedImage) return;
@@ -197,42 +151,8 @@ export const SupportChat = ({ user }: { user?: any }) => {
     setMessages(updatedMessages);
     setIsTyping(true);
 
-    // Resolve user ID once at the beginning of handleSend to avoid dual-login and race condition mismatch
-    let activeUserId: string | null = null;
-    if (isSupabaseConfigured) {
-      try {
-        const currentUser = user || (await supabase.auth.getUser()).data.user;
-        if (currentUser) {
-          activeUserId = await getResolvedUserId(currentUser);
-        }
-      } catch (err) {
-        console.error('[Support Chat] Error pre-resolving user session:', err);
-      }
-    }
-
-    // Save message to Supabase if configured
-    if (isSupabaseConfigured && activeUserId) {
-      try {
-        const { error: insertError } = await supabase
-          .from('chat_messages')
-          .insert({
-            user_id: activeUserId,
-            message: `user:${textToSend || 'Uploaded image'}`
-          });
-        if (insertError) {
-          console.error('[Support Chat] Error inserting message to Supabase:', insertError);
-          const customReason = insertError.message.toLowerCase().includes('foreign key')
-            ? "This is due to a foreign key constraint on the user_id column. Please enable Anonymous Sign-Ins in your Supabase Auth Dashboard so guest sessions have a valid authenticated user in the auth.users table."
-            : "This is likely caused by active Row Level Security (RLS) policies on your 'chat_messages' table rejecting anonymous or guest writes.";
-          setSupabaseWriteError(`Failed to save message to Supabase: "${insertError.message}". ${customReason}`);
-        } else {
-          setSupabaseWriteError(null);
-        }
-      } catch (err: any) {
-        console.error('[Support Chat] Supabase error in save message:', err);
-        setSupabaseWriteError(`Connection error: ${err.message || err}`);
-      }
-    }
+    // Save message to Supabase if configured under current session
+    await saveToSupabase(`user:${textToSend || 'Uploaded image'}`);
 
     try {
       const response = await fetch('/api/chat', {
@@ -260,37 +180,11 @@ export const SupportChat = ({ user }: { user?: any }) => {
           return next;
         });
 
-        // Save AI message to Supabase using the EXACT SAME pre-resolved user ID (which prevents RLS policy checks mismatch!)
-        if (isSupabaseConfigured && activeUserId) {
-          try {
-            const { error: insertError } = await supabase
-              .from('chat_messages')
-              .insert({
-                user_id: activeUserId,
-                message: `bot:${data.text}`
-              });
-            if (insertError) {
-              console.error('[Support Chat] Error inserting AI message to Supabase:', insertError);
-              setSupabaseWriteError(`Failed to save AI reply to Supabase: "${insertError.message}". Please verify your 'chat_messages' insert RLS policies.`);
-            } else {
-              setSupabaseWriteError(null);
-            }
+        // Save AI message to Supabase using standard save method
+        await saveToSupabase(`bot:${data.text}`);
 
-            if (data.escalated) {
-              const { error: escalationError } = await supabase
-                .from('chat_messages')
-                .insert({
-                  user_id: activeUserId,
-                  message: "bot:👩‍💼 [Human Handoff] I've connected this session directly to our duty manager. A live human agent is reviewing your logs and will message you shortly!"
-                });
-              if (escalationError) {
-                console.error('[Support Chat] Error inserting escalation status to Supabase:', escalationError);
-              }
-            }
-          } catch (err: any) {
-            console.error('[Support Chat] Supabase error in save AI message:', err);
-            setSupabaseWriteError(`Connection error: ${err.message || err}`);
-          }
+        if (data.escalated) {
+          await saveToSupabase("bot:👩‍💼 [Human Handoff] I've connected this session directly to our duty manager. A live human agent is reviewing your logs and will message you shortly!");
         }
       } else if (data.error) {
         setMessages(prev => [...prev, { text: `Support encountered a problem: ${data.error}`, type: 'bot' }]);
