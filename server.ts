@@ -13,8 +13,8 @@ const PORT = 3000;
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 
-// Initialize Gemini SDK with User-Agent heading - support either GEMINI_API_KEY or GOOGLE_API_KEY
-const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+// Initialize Gemini SDK with User-Agent heading - prioritize GOOGLE_API_KEY first as requested
+const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
 const ai = apiKey ? new GoogleGenAI({
   apiKey,
   httpOptions: {
