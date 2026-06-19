@@ -197,29 +197,36 @@ export const SupportChat = ({ user }: { user?: any }) => {
     setMessages(updatedMessages);
     setIsTyping(true);
 
-    // Save message to Supabase if configured
+    // Resolve user ID once at the beginning of handleSend to avoid dual-login and race condition mismatch
+    let activeUserId: string | null = null;
     if (isSupabaseConfigured) {
       try {
         const currentUser = user || (await supabase.auth.getUser()).data.user;
         if (currentUser) {
-          const resolvedUserId = await getResolvedUserId(currentUser);
-          if (resolvedUserId) {
-            const { error: insertError } = await supabase
-              .from('chat_messages')
-              .insert({
-                user_id: resolvedUserId,
-                message: `user:${textToSend || 'Uploaded image'}`
-              });
-            if (insertError) {
-              console.error('[Support Chat] Error inserting message to Supabase:', insertError);
-              const customReason = insertError.message.toLowerCase().includes('foreign key')
-                ? "This is due to a foreign key constraint on the user_id column. Please enable Anonymous Sign-Ins in your Supabase Auth Dashboard so guest sessions have a valid authenticated user in the auth.users table."
-                : "This is likely caused by active Row Level Security (RLS) policies on your 'chat_messages' table rejecting anonymous or guest writes.";
-              setSupabaseWriteError(`Failed to save message to Supabase: "${insertError.message}". ${customReason}`);
-            } else {
-              setSupabaseWriteError(null);
-            }
-          }
+          activeUserId = await getResolvedUserId(currentUser);
+        }
+      } catch (err) {
+        console.error('[Support Chat] Error pre-resolving user session:', err);
+      }
+    }
+
+    // Save message to Supabase if configured
+    if (isSupabaseConfigured && activeUserId) {
+      try {
+        const { error: insertError } = await supabase
+          .from('chat_messages')
+          .insert({
+            user_id: activeUserId,
+            message: `user:${textToSend || 'Uploaded image'}`
+          });
+        if (insertError) {
+          console.error('[Support Chat] Error inserting message to Supabase:', insertError);
+          const customReason = insertError.message.toLowerCase().includes('foreign key')
+            ? "This is due to a foreign key constraint on the user_id column. Please enable Anonymous Sign-Ins in your Supabase Auth Dashboard so guest sessions have a valid authenticated user in the auth.users table."
+            : "This is likely caused by active Row Level Security (RLS) policies on your 'chat_messages' table rejecting anonymous or guest writes.";
+          setSupabaseWriteError(`Failed to save message to Supabase: "${insertError.message}". ${customReason}`);
+        } else {
+          setSupabaseWriteError(null);
         }
       } catch (err: any) {
         console.error('[Support Chat] Supabase error in save message:', err);
@@ -253,41 +260,36 @@ export const SupportChat = ({ user }: { user?: any }) => {
           return next;
         });
 
-        // Save AI message to Supabase
-        if (isSupabaseConfigured) {
+        // Save AI message to Supabase using the EXACT SAME pre-resolved user ID (which prevents RLS policy checks mismatch!)
+        if (isSupabaseConfigured && activeUserId) {
           try {
-            const currentUser = user || (await supabase.auth.getUser()).data.user;
-            if (currentUser) {
-              const resolvedUserId = await getResolvedUserId(currentUser);
-              if (resolvedUserId) {
-                const { error: insertError } = await supabase
-                  .from('chat_messages')
-                  .insert({
-                    user_id: resolvedUserId,
-                    message: `bot:${data.text}`
-                  });
-                if (insertError) {
-                  console.error('[Support Chat] Error inserting AI message to Supabase:', insertError);
-                  setSupabaseWriteError(`Failed to save AI reply to Supabase: "${insertError.message}". Please verify your 'chat_messages' insert RLS policies.`);
-                } else {
-                  setSupabaseWriteError(null);
-                }
+            const { error: insertError } = await supabase
+              .from('chat_messages')
+              .insert({
+                user_id: activeUserId,
+                message: `bot:${data.text}`
+              });
+            if (insertError) {
+              console.error('[Support Chat] Error inserting AI message to Supabase:', insertError);
+              setSupabaseWriteError(`Failed to save AI reply to Supabase: "${insertError.message}". Please verify your 'chat_messages' insert RLS policies.`);
+            } else {
+              setSupabaseWriteError(null);
+            }
 
-                if (data.escalated) {
-                  const { error: escalationError } = await supabase
-                    .from('chat_messages')
-                    .insert({
-                      user_id: resolvedUserId,
-                      message: "bot:👩‍💼 [Human Handoff] I've connected this session directly to our duty manager. A live human agent is reviewing your logs and will message you shortly!"
-                    });
-                  if (escalationError) {
-                    console.error('[Support Chat] Error inserting escalation status to Supabase:', escalationError);
-                  }
-                }
+            if (data.escalated) {
+              const { error: escalationError } = await supabase
+                .from('chat_messages')
+                .insert({
+                  user_id: activeUserId,
+                  message: "bot:👩‍💼 [Human Handoff] I've connected this session directly to our duty manager. A live human agent is reviewing your logs and will message you shortly!"
+                });
+              if (escalationError) {
+                console.error('[Support Chat] Error inserting escalation status to Supabase:', escalationError);
               }
             }
-          } catch (err) {
+          } catch (err: any) {
             console.error('[Support Chat] Supabase error in save AI message:', err);
+            setSupabaseWriteError(`Connection error: ${err.message || err}`);
           }
         }
       } else if (data.error) {
