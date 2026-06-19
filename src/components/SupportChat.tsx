@@ -18,6 +18,7 @@ export const SupportChat = ({ user }: { user?: any }) => {
   const [isTyping, setIsTyping] = useState(false);
   const [isApiHealthy, setIsApiHealthy] = useState(true);
   const [isEscalated, setIsEscalated] = useState(false);
+  const [supabaseWriteError, setSupabaseWriteError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -30,16 +31,53 @@ export const SupportChat = ({ user }: { user?: any }) => {
         // First look for any existing background anonymous session in Supabase
         const { data: { session } } = await supabase.auth.getSession();
         if (session?.user) {
+          // Clear any previous error if we recovered a session
+          setSupabaseWriteError(null);
           return session.user.id;
         }
 
         // If no active session, sign in anonymously to create a valid authenticated session
         const { data: anonymousData, error: anonymousError } = await supabase.auth.signInAnonymously();
-        if (!anonymousError && anonymousData?.user) {
+        if (anonymousError) {
+          console.warn('[Support Chat] Supabase Anonymous sign-in failed, attempting shared guest credential authentication:', anonymousError);
+          
+          const guestEmail = 'guest_demo_user@foodfix.com';
+          const guestPassword = 'FoodFixGuestPassword123!';
+          
+          // Try signing in
+          const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+            email: guestEmail,
+            password: guestPassword
+          });
+          
+          if (!signInError && signInData?.user) {
+            setSupabaseWriteError(null);
+            return signInData.user.id;
+          }
+          
+          // If sign in failed because the user doesn't exist yet, sign them up
+          const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+            email: guestEmail,
+            password: guestPassword
+          });
+          
+          if (!signUpError && signUpData?.user) {
+            setSupabaseWriteError(null);
+            return signUpData.user.id;
+          }
+
+          // If all options fail, show a clear diagnostic error
+          const detailedError = signUpError?.message || signInError?.message || anonymousError.message;
+          setSupabaseWriteError(
+            `Supabase Guest authentication failed: "${detailedError}". Please make sure either (1) 'Allow Anonymous Sign-ins' is enabled under Authentication -> Providers -> Anonymous in your Supabase Auth Dashboard, or (2) Email signup/authentication is allowed.`
+          );
+        } else if (anonymousData?.user) {
+          setSupabaseWriteError(null);
           return anonymousData.user.id;
         }
-      } catch (e) {
+      } catch (e: any) {
         console.error('[Support Chat] Error resolving guest user session:', e);
+        setSupabaseWriteError(`Error resolving guest session: ${e.message || e}`);
       }
 
       // Fallback: Generate a persistent valid UUID format to satisfy Postgres data type layout
@@ -74,7 +112,12 @@ export const SupportChat = ({ user }: { user?: any }) => {
 
           if (error) {
             console.error('[Support Chat] Error fetching previous messages:', error);
+            setSupabaseWriteError(
+              `Failed to load previous messages: "${error.message}". Please verify that the 'chat_messages' table exists in your Supabase database and that RLS policies allow you to select rows.`
+            );
           } else if (data) {
+            // Clear any active write/sync error if fetching succeed
+            setSupabaseWriteError(null);
             const dbMessages: ChatMessage[] = data.map((msg: any) => {
               let type: 'user' | 'bot' = 'user';
               let text = msg.message || '';
@@ -169,11 +212,18 @@ export const SupportChat = ({ user }: { user?: any }) => {
               });
             if (insertError) {
               console.error('[Support Chat] Error inserting message to Supabase:', insertError);
+              const customReason = insertError.message.toLowerCase().includes('foreign key')
+                ? "This is due to a foreign key constraint on the user_id column. Please enable Anonymous Sign-Ins in your Supabase Auth Dashboard so guest sessions have a valid authenticated user in the auth.users table."
+                : "This is likely caused by active Row Level Security (RLS) policies on your 'chat_messages' table rejecting anonymous or guest writes.";
+              setSupabaseWriteError(`Failed to save message to Supabase: "${insertError.message}". ${customReason}`);
+            } else {
+              setSupabaseWriteError(null);
             }
           }
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error('[Support Chat] Supabase error in save message:', err);
+        setSupabaseWriteError(`Connection error: ${err.message || err}`);
       }
     }
 
@@ -218,15 +268,21 @@ export const SupportChat = ({ user }: { user?: any }) => {
                   });
                 if (insertError) {
                   console.error('[Support Chat] Error inserting AI message to Supabase:', insertError);
+                  setSupabaseWriteError(`Failed to save AI reply to Supabase: "${insertError.message}". Please verify your 'chat_messages' insert RLS policies.`);
+                } else {
+                  setSupabaseWriteError(null);
                 }
 
                 if (data.escalated) {
-                  await supabase
+                  const { error: escalationError } = await supabase
                     .from('chat_messages')
                     .insert({
                       user_id: resolvedUserId,
                       message: "bot:👩‍💼 [Human Handoff] I've connected this session directly to our duty manager. A live human agent is reviewing your logs and will message you shortly!"
                     });
+                  if (escalationError) {
+                    console.error('[Support Chat] Error inserting escalation status to Supabase:', escalationError);
+                  }
                 }
               }
             }
@@ -323,6 +379,19 @@ export const SupportChat = ({ user }: { user?: any }) => {
               <div className="bg-amber-50 text-amber-800 p-2 text-[11px] flex items-center gap-1.5 border-b border-amber-100 font-medium leading-tight shrink-0">
                 <AlertCircle size={14} className="shrink-0 text-amber-600" />
                 <span>Express API not responding. Testing simulation mode...</span>
+              </div>
+            )}
+
+            {/* Supabase Diagnostic Sync Warning Bar */}
+            {isSupabaseConfigured && supabaseWriteError && (
+              <div id="supabase-sync-alert" className="bg-red-50 text-red-800 p-3 text-[11px] border-b border-red-100 font-medium leading-relaxed shrink-0 max-h-32 overflow-y-auto">
+                <div className="flex items-start gap-1.5">
+                  <AlertCircle size={14} className="shrink-0 text-red-600 mt-0.5" />
+                  <div>
+                    <span className="font-bold block text-red-950 mb-0.5">Supabase Sync Blocked</span>
+                    <span className="text-slate-600 font-normal">{supabaseWriteError}</span>
+                  </div>
+                </div>
               </div>
             )}
 
