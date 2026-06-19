@@ -21,6 +21,41 @@ export const SupportChat = ({ user }: { user?: any }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // Helper to resolve user ID for Supabase operations (handling standard auth vs guest mode)
+  const getResolvedUserId = async (currentUser: any): Promise<string | null> => {
+    if (!currentUser) return null;
+
+    if (currentUser.id === 'demo-guest-user') {
+      try {
+        // First look for any existing background anonymous session in Supabase
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          return session.user.id;
+        }
+
+        // If no active session, sign in anonymously to create a valid authenticated session
+        const { data: anonymousData, error: anonymousError } = await supabase.auth.signInAnonymously();
+        if (!anonymousError && anonymousData?.user) {
+          return anonymousData.user.id;
+        }
+      } catch (e) {
+        console.error('[Support Chat] Error resolving guest user session:', e);
+      }
+
+      // Fallback: Generate a persistent valid UUID format to satisfy Postgres data type layout
+      let fallbackId = localStorage.getItem('foodfix_guest_chat_uuid');
+      if (!fallbackId) {
+        fallbackId = '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, (c: any) =>
+          (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+        );
+        localStorage.setItem('foodfix_guest_chat_uuid', fallbackId);
+      }
+      return fallbackId;
+    }
+
+    return currentUser.id;
+  };
+
   // Load previous messages from Supabase chat_messages on component mount or when user changes
   useEffect(() => {
     const fetchPreviousMessages = async () => {
@@ -28,10 +63,13 @@ export const SupportChat = ({ user }: { user?: any }) => {
       try {
         const currentUser = user || (await supabase.auth.getUser()).data.user;
         if (currentUser) {
+          const resolvedUserId = await getResolvedUserId(currentUser);
+          if (!resolvedUserId) return;
+
           const { data, error } = await supabase
             .from('chat_messages')
             .select('*')
-            .eq('user_id', currentUser.id)
+            .eq('user_id', resolvedUserId)
             .order('created_at', { ascending: true });
 
           if (error) {
@@ -121,14 +159,17 @@ export const SupportChat = ({ user }: { user?: any }) => {
       try {
         const currentUser = user || (await supabase.auth.getUser()).data.user;
         if (currentUser) {
-          const { error: insertError } = await supabase
-            .from('chat_messages')
-            .insert({
-              user_id: currentUser.id,
-              message: `user:${textToSend || 'Uploaded image'}`
-            });
-          if (insertError) {
-            console.error('[Support Chat] Error inserting message to Supabase:', insertError);
+          const resolvedUserId = await getResolvedUserId(currentUser);
+          if (resolvedUserId) {
+            const { error: insertError } = await supabase
+              .from('chat_messages')
+              .insert({
+                user_id: resolvedUserId,
+                message: `user:${textToSend || 'Uploaded image'}`
+              });
+            if (insertError) {
+              console.error('[Support Chat] Error inserting message to Supabase:', insertError);
+            }
           }
         }
       } catch (err) {
@@ -167,23 +208,26 @@ export const SupportChat = ({ user }: { user?: any }) => {
           try {
             const currentUser = user || (await supabase.auth.getUser()).data.user;
             if (currentUser) {
-              const { error: insertError } = await supabase
-                .from('chat_messages')
-                .insert({
-                  user_id: currentUser.id,
-                  message: `bot:${data.text}`
-                });
-              if (insertError) {
-                console.error('[Support Chat] Error inserting AI message to Supabase:', insertError);
-              }
-
-              if (data.escalated) {
-                await supabase
+              const resolvedUserId = await getResolvedUserId(currentUser);
+              if (resolvedUserId) {
+                const { error: insertError } = await supabase
                   .from('chat_messages')
                   .insert({
-                    user_id: currentUser.id,
-                    message: "bot:👩‍💼 [Human Handoff] I've connected this session directly to our duty manager. A live human agent is reviewing your logs and will message you shortly!"
+                    user_id: resolvedUserId,
+                    message: `bot:${data.text}`
                   });
+                if (insertError) {
+                  console.error('[Support Chat] Error inserting AI message to Supabase:', insertError);
+                }
+
+                if (data.escalated) {
+                  await supabase
+                    .from('chat_messages')
+                    .insert({
+                      user_id: resolvedUserId,
+                      message: "bot:👩‍💼 [Human Handoff] I've connected this session directly to our duty manager. A live human agent is reviewing your logs and will message you shortly!"
+                    });
+                }
               }
             }
           } catch (err) {
